@@ -240,6 +240,7 @@ class QCNet(pl.LightningModule):
         l2_norm = (torch.norm(traj_propose[..., :self.output_dim] -
                               gt[..., :self.output_dim].unsqueeze(1), p=2, dim=-1) * reg_mask.unsqueeze(1)).sum(dim=-1)
         best_mode = l2_norm.argmin(dim=-1)
+        # [num_agent, num_future_steps, output_dim]
         traj_propose_best = traj_propose[torch.arange(traj_propose.size(0)), best_mode]
         traj_refine_best = traj_refine[torch.arange(traj_refine.size(0)), best_mode]
         reg_loss_propose = self.reg_loss(traj_propose_best,
