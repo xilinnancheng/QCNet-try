@@ -93,14 +93,20 @@ class QCNetMapEncoder(nn.Module):
         self.apply(weight_init)
 
     def forward(self, data: HeteroData) -> Dict[str, torch.Tensor]:
+        # position of point
         pos_pt = data['map_point']['position'][:, :self.input_dim].contiguous()
+        # orientation of point
         orient_pt = data['map_point']['orientation'].contiguous()
+        # position of polygon
         pos_pl = data['map_polygon']['position'][:, :self.input_dim].contiguous()
+        # orientation of polygon
         orient_pl = data['map_polygon']['orientation'].contiguous()
+        # cos sin of orientation
         orient_vector_pl = torch.stack([orient_pl.cos(), orient_pl.sin()], dim=-1)
 
         if self.dataset == 'argoverse_v2':
             if self.input_dim == 2:
+                # [num_agent, 1]
                 x_pt = data['map_point']['magnitude'].unsqueeze(-1)
                 x_pl = None
             elif self.input_dim == 3:
@@ -114,7 +120,9 @@ class QCNetMapEncoder(nn.Module):
                                      self.int_pl_emb(data['map_polygon']['is_intersection'].long())]
         else:
             raise ValueError('{} is not a valid dataset'.format(self.dataset))
+        # [num_point, num_hidden_dim]
         x_pt = self.x_pt_emb(continuous_inputs=x_pt, categorical_embs=x_pt_categorical_embs)
+        # [num_polygon, num_hidden_dim]
         x_pl = self.x_pl_emb(continuous_inputs=x_pl, categorical_embs=x_pl_categorical_embs)
 
         edge_index_pt2pl = data['map_point', 'to', 'map_polygon']['edge_index']
@@ -167,6 +175,7 @@ class QCNetMapEncoder(nn.Module):
         for i in range(self.num_layers):
             x_pl = self.pt2pl_layers[i]((x_pt, x_pl), r_pt2pl, edge_index_pt2pl)
             x_pl = self.pl2pl_layers[i](x_pl, r_pl2pl, edge_index_pl2pl)
+        # [num_poly, num_historical_steps, self.hidden_dim]
         x_pl = x_pl.repeat_interleave(repeats=self.num_historical_steps,
                                       dim=0).reshape(-1, self.num_historical_steps, self.hidden_dim)
 

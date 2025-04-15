@@ -163,6 +163,7 @@ class QCNet(pl.LightningModule):
                       batch_idx):
         if isinstance(data, Batch):
             data['agent']['av_index'] += data['agent']['ptr'][:-1]
+        # [num_agent, num_future_steps]
         reg_mask = data['agent']['predict_mask'][:, self.num_historical_steps:]
         cls_mask = data['agent']['predict_mask'][:, -1]
         pred = self(data)
@@ -211,10 +212,12 @@ class QCNet(pl.LightningModule):
                         batch_idx):
         if isinstance(data, Batch):
             data['agent']['av_index'] += data['agent']['ptr'][:-1]
+        # [num_agent, num_future_steps]
         reg_mask = data['agent']['predict_mask'][:, self.num_historical_steps:]
         cls_mask = data['agent']['predict_mask'][:, -1]
         pred = self(data)
         if self.output_head:
+            # [num_agent, num_modes, num_future_steps, output_dim + 1 + ouput_dim + 1]
             traj_propose = torch.cat([pred['loc_propose_pos'][..., :self.output_dim],
                                       pred['loc_propose_head'],
                                       pred['scale_propose_pos'][..., :self.output_dim],
@@ -229,7 +232,11 @@ class QCNet(pl.LightningModule):
             traj_refine = torch.cat([pred['loc_refine_pos'][..., :self.output_dim],
                                      pred['scale_refine_pos'][..., :self.output_dim]], dim=-1)
         pi = pred['pi']
+        # [num_agent, num_future_steps, output_dim]
         gt = torch.cat([data['agent']['target'][..., :self.output_dim], data['agent']['target'][..., -1:]], dim=-1)
+        # - :   [num_agent, num_modes, num_future_steps, output_dim]
+        # norm: [num_agent, num_modes, num_future_steps]
+        # sum : [num_agent, num_modes]
         l2_norm = (torch.norm(traj_propose[..., :self.output_dim] -
                               gt[..., :self.output_dim].unsqueeze(1), p=2, dim=-1) * reg_mask.unsqueeze(1)).sum(dim=-1)
         best_mode = l2_norm.argmin(dim=-1)

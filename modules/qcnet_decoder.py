@@ -141,30 +141,50 @@ class QCNetDecoder(nn.Module):
     def forward(self,
                 data: HeteroData,
                 scene_enc: Mapping[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+        # current step
+        # [num_agent, input_dim]
         pos_m = data['agent']['position'][:, self.num_historical_steps - 1, :self.input_dim]
+        # [num_agent]
         head_m = data['agent']['heading'][:, self.num_historical_steps - 1]
+        # [num_agent, 2]
         head_vector_m = torch.stack([head_m.cos(), head_m.sin()], dim=-1)
 
+        # [num_agent * historical_step, hidden_dim]
         x_t = scene_enc['x_a'].reshape(-1, self.hidden_dim)
+        # [num_modes * num_polygon, hidden_dim]
         x_pl = scene_enc['x_pl'][:, self.num_historical_steps - 1].repeat(self.num_modes, 1)
+        # [num_modes * num_agent, hidden_dim]
         x_a = scene_enc['x_a'][:, -1].repeat(self.num_modes, 1)
+        # [num_agent * num_modes, hidden_dim]
         m = self.mode_emb.weight.repeat(scene_enc['x_a'].size(0), 1)
 
+        # [num_agent, historical_step]
         mask_src = data['agent']['valid_mask'][:, :self.num_historical_steps].contiguous()
+        # ????
         mask_src[:, :self.num_historical_steps - self.num_t2m_steps] = False
+        # [num_agent, num_modes]
         mask_dst = data['agent']['predict_mask'].any(dim=-1, keepdim=True).repeat(1, self.num_modes)
 
+        # [num_agent * historical_step, input_dim]
         pos_t = data['agent']['position'][:, :self.num_historical_steps, :self.input_dim].reshape(-1, self.input_dim)
         head_t = data['agent']['heading'][:, :self.num_historical_steps].reshape(-1)
+        # index between agent historical step and one mode
+        # mask_src: [num_agent, historical_step]
+        # mask_dst[:, -1:]: [num_agent, 1]
         edge_index_t2m = bipartite_dense_to_sparse(mask_src.unsqueeze(2) & mask_dst[:, -1:].unsqueeze(1))
         rel_pos_t2m = pos_t[edge_index_t2m[0]] - pos_m[edge_index_t2m[1]]
         rel_head_t2m = wrap_angle(head_t[edge_index_t2m[0]] - head_m[edge_index_t2m[1]])
+        # [???, 4]
         r_t2m = torch.stack(
             [torch.norm(rel_pos_t2m[:, :2], p=2, dim=-1),
              angle_between_2d_vectors(ctr_vector=head_vector_m[edge_index_t2m[1]], nbr_vector=rel_pos_t2m[:, :2]),
              rel_head_t2m,
              (edge_index_t2m[0] % self.num_historical_steps) - self.num_historical_steps + 1], dim=-1)
         r_t2m = self.r_t2m_emb(continuous_inputs=r_t2m, categorical_embs=None)
+        
+        # mask_src: [num_agent, historical_step]
+        # mask_dst: [num_agent, num_mode]
+        # mask_src.unsqueeze(2) & mask_dst.unsqueeze(1): [num_agent, hisitorical_step, num_mode]
         edge_index_t2m = bipartite_dense_to_sparse(mask_src.unsqueeze(2) & mask_dst.unsqueeze(1))
         r_t2m = r_t2m.repeat_interleave(repeats=self.num_modes, dim=0)
 
@@ -180,6 +200,8 @@ class QCNetDecoder(nn.Module):
         edge_index_pl2m = edge_index_pl2m[:, mask_dst[edge_index_pl2m[1], 0]]
         rel_pos_pl2m = pos_pl[edge_index_pl2m[0]] - pos_m[edge_index_pl2m[1]]
         rel_orient_pl2m = wrap_angle(orient_pl[edge_index_pl2m[0]] - head_m[edge_index_pl2m[1]])
+        # for one mode
+        # [???, 3]
         r_pl2m = torch.stack(
             [torch.norm(rel_pos_pl2m[:, :2], p=2, dim=-1),
              angle_between_2d_vectors(ctr_vector=head_vector_m[edge_index_pl2m[1]], nbr_vector=rel_pos_pl2m[:, :2]),
@@ -189,6 +211,7 @@ class QCNetDecoder(nn.Module):
             [[data['map_polygon']['num_nodes']], [data['agent']['num_nodes']]]) for i in range(self.num_modes)], dim=1)
         r_pl2m = r_pl2m.repeat(self.num_modes, 1)
 
+        # for all modes
         edge_index_a2m = radius_graph(
             x=pos_m[:, :2],
             r=self.a2m_radius,
@@ -214,15 +237,20 @@ class QCNetDecoder(nn.Module):
         scales_propose_pos: List[Optional[torch.Tensor]] = [None] * self.num_recurrent_steps
         locs_propose_head: List[Optional[torch.Tensor]] = [None] * self.num_recurrent_steps
         concs_propose_head: List[Optional[torch.Tensor]] = [None] * self.num_recurrent_steps
+        # anchor free trajectory proposal
         for t in range(self.num_recurrent_steps):
             for i in range(self.num_layers):
                 m = m.reshape(-1, self.hidden_dim)
+                # [num_agent * num_mode, hidden_dim]
                 m = self.t2m_propose_attn_layers[i]((x_t, m), r_t2m, edge_index_t2m)
+                # [num_mode * num_agent, hidden_dim]
                 m = m.reshape(-1, self.num_modes, self.hidden_dim).transpose(0, 1).reshape(-1, self.hidden_dim)
+                
                 m = self.pl2m_propose_attn_layers[i]((x_pl, m), r_pl2m, edge_index_pl2m)
                 m = self.a2m_propose_attn_layers[i]((x_a, m), r_a2m, edge_index_a2m)
                 m = m.reshape(self.num_modes, -1, self.hidden_dim).transpose(0, 1).reshape(-1, self.hidden_dim)
             m = self.m2m_propose_attn_layer(m, None, edge_index_m2m)
+            # [num_agent, num_mode, hidden_dim]
             m = m.reshape(-1, self.num_modes, self.hidden_dim)
             locs_propose_pos[t] = self.to_loc_propose_pos(m)
             scales_propose_pos[t] = self.to_scale_propose_pos(m)
@@ -243,6 +271,8 @@ class QCNetDecoder(nn.Module):
                                             dim=-2)
             conc_propose_head = 1.0 / (torch.cumsum(F.elu_(torch.cat(concs_propose_head, dim=-1).unsqueeze(-1)) + 1.0,
                                                     dim=-2) + 0.02)
+            # [num_agent * num_mode * num_future, output_dim + heading_dim]
+            # [num_agent * num_mode * num_future, hidden_dim]
             m = self.y_emb(torch.cat([loc_propose_pos.detach(),
                                       wrap_angle(loc_propose_head.detach())], dim=-1).view(-1, self.output_dim + 1))
         else:
@@ -251,6 +281,7 @@ class QCNetDecoder(nn.Module):
             conc_propose_head = scale_propose_pos.new_zeros((scale_propose_pos.size(0), self.num_modes,
                                                              self.num_future_steps, 1))
             m = self.y_emb(loc_propose_pos.detach().view(-1, self.output_dim))
+        # [num_future, num_agent * num_mode, hidden_dim]
         m = m.reshape(-1, self.num_future_steps, self.hidden_dim).transpose(0, 1)
         m = self.traj_emb(m, self.traj_emb_h0.unsqueeze(1).repeat(1, m.size(1), 1))[1].squeeze(0)
         for i in range(self.num_layers):
@@ -262,6 +293,7 @@ class QCNetDecoder(nn.Module):
         m = self.m2m_refine_attn_layer(m, None, edge_index_m2m)
         m = m.reshape(-1, self.num_modes, self.hidden_dim)
         loc_refine_pos = self.to_loc_refine_pos(m).view(-1, self.num_modes, self.num_future_steps, self.output_dim)
+        # [num_agent, num_modes, num_future_steps, output_dim]
         loc_refine_pos = loc_refine_pos + loc_propose_pos.detach()
         scale_refine_pos = F.elu_(
             self.to_scale_refine_pos(m).view(-1, self.num_modes, self.num_future_steps, self.output_dim),
